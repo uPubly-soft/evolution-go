@@ -441,7 +441,16 @@ func (i instances) GetQr(instance *instance_model.Instance) (*QrcodeStruct, erro
 	// numa sessão logada derruba o whatsmeow (Disconnected → novo QR), o que pode ser
 	// disparado por polling do frontend logo após PairSuccess, quebrando a conexão.
 	if client != nil && client.IsLoggedIn() {
-		logger.LogInfo("[%s] Client is already logged in — returning 'session already logged in' (StartInstance skipped to avoid disconnect)", instance.Id)
+		// A paired session that dropped has no QR to show either, but asking for one used to bring it back:
+		// keep doing that, since restarting a disconnected client breaks nothing.
+		if !client.IsConnected() {
+			logger.LogInfo("[%s] Client is logged in but disconnected — reconnecting instead of generating a QR", instance.Id)
+			if err := i.whatsmeowService.StartInstance(instance.Id); err != nil {
+				return nil, fmt.Errorf("failed to start instance: %w", err)
+			}
+		} else {
+			logger.LogInfo("[%s] Client is already logged in — returning 'session already logged in' (StartInstance skipped to avoid disconnect)", instance.Id)
+		}
 		return nil, fmt.Errorf("session already logged in")
 	}
 

@@ -2122,6 +2122,14 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 				if mycli.WAClient.IsConnected() {
 					return // already recovered by the time this goroutine ran
 				}
+				// The QR timeout or a delete may have torn this client down meanwhile; connecting it again would
+				// leave a socket behind for an instance that no longer runs it.
+				ClientMapsMu.RLock()
+				current := mycli.clientPointer[instanceID]
+				ClientMapsMu.RUnlock()
+				if current != mycli.WAClient {
+					return
+				}
 				if err := mycli.WAClient.Connect(); err != nil {
 					mycli.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] Reconnect attempt during QR pairing failed: %v", instanceID, err)
 				} else {
