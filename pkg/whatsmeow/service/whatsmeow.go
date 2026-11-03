@@ -403,6 +403,12 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 		}
 	}
 
+	// DeviceProps only describes the companion; the handshake sends the global client version, so set that too
+	// or WhatsApp rejects the connection as outdated (405).
+	if version.Major != 0 && version.Minor != 0 && version.Patch != 0 {
+		store.SetWAVersion(store.WAVersionContainer{uint32(version.Major), uint32(version.Minor), uint32(version.Patch)})
+	}
+
 	// 🔒 FIX: Sempre criar logger, mesmo que WaDebug esteja vazio
 	// Usar "INFO" como nível mínimo para garantir que logs importantes apareçam
 	minLevel := w.config.WaDebug
