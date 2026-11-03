@@ -607,6 +607,11 @@ func (h *instanceHandler) GetAdvancedSettings(c *gin.Context) {
 		return
 	}
 
+	if !ownsInstance(c, instanceId) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not authorized for this instance"})
+		return
+	}
+
 	settings, err := h.instanceService.GetAdvancedSettings(instanceId)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -637,6 +642,11 @@ func (h *instanceHandler) UpdateAdvancedSettings(c *gin.Context) {
 		return
 	}
 
+	if !ownsInstance(c, instanceId) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not authorized for this instance"})
+		return
+	}
+
 	var settings instance_model.AdvancedSettings
 	if err := c.ShouldBindJSON(&settings); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -653,6 +663,13 @@ func (h *instanceHandler) UpdateAdvancedSettings(c *gin.Context) {
 		"message":  "Advanced settings updated successfully",
 		"settings": settings,
 	})
+}
+
+// ownsInstance reports whether the instance token that authenticated the request belongs to instanceId: the
+// path names the instance, and without this check any instance's token could read or change another's settings.
+func ownsInstance(c *gin.Context, instanceId string) bool {
+	instance, ok := c.MustGet("instance").(*instance_model.Instance)
+	return ok && instance != nil && instance.Id == instanceId
 }
 
 func NewInstanceHandler(instanceService instance_service.InstanceService, config *config.Config) InstanceHandler {
