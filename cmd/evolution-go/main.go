@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -82,7 +83,7 @@ func init() {
 	}
 }
 
-func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.Config, conn *amqp.Connection, exPath string, runtimeCtx *core.RuntimeContext) *gin.Engine {
+func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.Config, conn *amqp.Connection, exPath string, runtimeCtx *core.RuntimeContext) (*gin.Engine, func()) {
 	killChannel := make(map[string](chan bool))
 	clientPointer := make(map[string]*whatsmeow.Client)
 
@@ -258,7 +259,17 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		websocket_producer.ServeWs(c.Writer, c.Request, instanceId, websocketProducer)
 	})
 
-	return r
+	// On shutdown, after the HTTP server stopped: disconnect the numbers (no logout), so WhatsApp keeps what arrives
+	// next for the next process, then wait for the webhooks already on their way (WhatsApp got the ack for those
+	// messages; the request is the only copy). The compose stop_grace_period must cover 10s + the drain timeout.
+	releaseWhatsApp := func() {
+		logger.LogInfo("[SHUTDOWN] Disconnected %d WhatsApp clients", whatsmeowService.DisconnectAll())
+		if drainer, ok := webhookProducer.(webhook_producer.Drainer); ok && drainer.Drain(webhookDrainTimeout()) {
+			logger.LogInfo("[SHUTDOWN] Webhook deliveries drained")
+		}
+	}
+
+	return r, releaseWhatsApp
 }
 
 func migrate(db *gorm.DB) {
@@ -405,7 +416,7 @@ func main() {
 		logger.LogInfo("RabbitMQ URL not configured, skipping RabbitMQ connection")
 	}
 
-	r := setupRouter(db, authDB, sqliteDB, cfg, conn, exPath, runtimeCtx)
+	r, releaseWhatsApp := setupRouter(db, authDB, sqliteDB, cfg, conn, exPath, runtimeCtx)
 
 	// Graceful shutdown with heartbeat
 	heartbeatCtx, heartbeatCancel := context.WithCancel(context.Background())
@@ -434,8 +445,7 @@ func main() {
 	// Stop heartbeat loop
 	heartbeatCancel()
 
-	core.Shutdown(runtimeCtx)
-
+	// 1. Stop taking API calls and let the ones running (a send in progress) finish while the numbers are connected.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
@@ -443,5 +453,18 @@ func main() {
 		logger.LogError("[SHUTDOWN] Server forced to shutdown: %v", err)
 	}
 
+	// 2. Disconnect the numbers and wait for the webhooks already on their way (releaseWhatsApp, from setupRouter).
+	releaseWhatsApp()
+
+	core.Shutdown(runtimeCtx)
+
 	logger.LogInfo("[SHUTDOWN] Server exited")
+}
+
+// webhookDrainTimeout is how long shutdown waits for webhook deliveries: SHUTDOWN_WEBHOOK_DRAIN_SECONDS, default 15.
+func webhookDrainTimeout() time.Duration {
+	if v, err := strconv.Atoi(os.Getenv("SHUTDOWN_WEBHOOK_DRAIN_SECONDS")); err == nil && v >= 0 {
+		return time.Duration(v) * time.Second
+	}
+	return 15 * time.Second
 }
