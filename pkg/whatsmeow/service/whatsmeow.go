@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/image/webp"
@@ -136,7 +137,17 @@ type MyClient struct {
 	loggerWrapper      *logger_wrapper.LoggerManager
 	qrcodeCount        int
 	passkeyCeremony    *ceremony.Store
+	// Set by teardownQR before the kill: the pairing ended with no scan, so the kill must not restart the client.
+	qrTimedOut atomic.Bool
 }
+
+// markQRTimedOut records that the QR pairing of this client ended with no scan.
+func (mycli *MyClient) markQRTimedOut() { mycli.qrTimedOut.Store(true) }
+
+// restartAfterKill reports whether StartClient brings the client back after its kill. A QR timeout keeps it down:
+// restarting meant a new device and new QR codes, then another timeout, forever, for a number nobody pairs. GetQr
+// (or /instance/connect) starts a new client when a QR is asked for again.
+func (mycli *MyClient) restartAfterKill() bool { return !mycli.qrTimedOut.Load() }
 
 func (mycli *MyClient) persistMessageAsync(message message_model.Message) {
 	if mycli == nil || mycli.messageRepository == nil {
@@ -679,7 +690,11 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 				go mycli.service.SendToGlobalQueues(postMap["event"].(string), values, mycli.userID)
 			}
 
-			// restart client
+			// restart client, unless the pairing timed out: then it waits for the next QR request.
+			if !mycli.restartAfterKill() {
+				w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] QR pairing ended with no scan, client stays stopped until a QR is requested", cd.Instance.Id)
+				return
+			}
 			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Restarting client", cd.Instance.Id)
 			w.StartClient(cd)
 			return
@@ -804,9 +819,7 @@ func (mycli *MyClient) handleQRCodes(codes []string) {
 				return
 			}
 
-			if mycli.config.LogType != "json" {
-				fmt.Println("QR code:\n", code)
-			}
+			// The code itself is never logged: whoever reads it within its 20s can pair the number to their own phone.
 
 			image, _ := qrcode.Encode(code, qrcode.Medium, 256)
 			base64qrcode := "data:image/png;base64," + base64.StdEncoding.EncodeToString(image)
@@ -908,6 +921,7 @@ func (mycli *MyClient) teardownQR(reason string, forceLogout bool) {
 	// Signal StartClient's select loop to disconnect and clean up the shared
 	// maps (it is the single writer for this instance). Blocking send mirrors
 	// the original timeout branch so the signal is never dropped.
+	mycli.markQRTimedOut()
 	mycli.loggerWrapper.GetLogger(instanceID).LogWarn("[%s] QR timeout — signaling kill channel", instanceID)
 	ClientMapsMu.RLock()
 	killChan, exists := mycli.killChannel[instanceID]
@@ -2215,7 +2229,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] ID is not 66 or 67 or view_once, skipping", mycli.userID)
 		}
 	default:
-		mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Unhandled event %s: %+v", mycli.userID, fmt.Sprintf("%T", evt), evt)
+		mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Unhandled event %T", mycli.userID, evt) // only the type: some events carry secrets (RotateADVSecret)
 		return
 	}
 
