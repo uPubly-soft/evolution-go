@@ -63,6 +63,7 @@ type WhatsmeowService interface {
 	UpdateInstanceSettings(instanceId string) error
 	UpdateInstanceAdvancedSettings(instanceId string) error
 	GetPollService() poll_service.PollService // NOVO: Acesso ao serviço de polls
+	DisconnectAll() int
 
 	// Passkey (WebAuthn) pairing bridge — read by the public ceremony endpoint,
 	// written by the whatsmeow event goroutine.
@@ -2267,6 +2268,25 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 	} else {
 		mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] ===== WEBHOOK SKIPPED ===== doWebhook=false", mycli.userID)
 	}
+}
+
+// DisconnectAll closes the WhatsApp connection of every running client, for shutdown. It is a disconnect, not a
+// logout: the session stays paired, WhatsApp keeps what arrives next and delivers it when the next process connects.
+// A manual disconnect neither reconnects nor fires the kill/restart path. Returns how many clients it disconnected.
+func (w *whatsmeowService) DisconnectAll() int {
+	ClientMapsMu.RLock()
+	clients := make([]*whatsmeow.Client, 0, len(w.clientPointer))
+	for _, client := range w.clientPointer {
+		if client != nil {
+			clients = append(clients, client)
+		}
+	}
+	ClientMapsMu.RUnlock()
+
+	for _, client := range clients {
+		client.Disconnect()
+	}
+	return len(clients)
 }
 
 func (w *whatsmeowService) CallWebhook(instance *instance_model.Instance, queueName string, jsonData []byte) {
